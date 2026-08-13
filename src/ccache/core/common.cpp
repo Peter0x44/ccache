@@ -28,8 +28,11 @@
 #include <ccache/util/path.hpp>
 #include <ccache/util/tokenizer.hpp>
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
+#include <limits>
+#include <utility>
 
 using IncludeDelimiter = util::Tokenizer::IncludeDelimiter;
 
@@ -175,6 +178,85 @@ parse_erase_line_mode(std::string_view parameters)
   }
   return mode;
 }
+
+std::optional<std::pair<std::uint32_t, size_t>>
+decode_utf8_character(std::string_view text)
+{
+  if (text.empty()) {
+    return std::nullopt;
+  }
+
+  const auto first_byte = static_cast<unsigned char>(text[0]);
+  std::uint32_t codepoint;
+  size_t length;
+  if (first_byte < 0x80) {
+    return std::pair{first_byte, size_t{1}};
+  } else if (first_byte >= 0xc2 && first_byte <= 0xdf) {
+    codepoint = first_byte & 0x1f;
+    length = 2;
+  } else if (first_byte >= 0xe0 && first_byte <= 0xef) {
+    codepoint = first_byte & 0x0f;
+    length = 3;
+  } else if (first_byte >= 0xf0 && first_byte <= 0xf4) {
+    codepoint = first_byte & 0x07;
+    length = 4;
+  } else {
+    return std::nullopt;
+  }
+
+  for (size_t i = 1; i < length; ++i) {
+    if (i >= text.size()) {
+      return std::nullopt;
+    }
+    const auto current_byte = static_cast<unsigned char>(text[i]);
+    if ((current_byte & 0xc0) != 0x80) {
+      return std::nullopt;
+    }
+    codepoint = (codepoint << 6) | (current_byte & 0x3f);
+  }
+
+  if ((length == 3 && codepoint < 0x800) || (length == 4 && codepoint < 0x10000)
+      || (codepoint >= 0xd800 && codepoint <= 0xdfff) || codepoint > 0x10ffff) {
+    return std::nullopt;
+  }
+  return std::pair{codepoint, length};
+}
+
+std::optional<std::wstring>
+utf8_to_utf16(std::string_view text)
+{
+  size_t pos = 0;
+  while (pos < text.size()
+         && static_cast<unsigned char>(text[pos]) < 0x80) {
+    ++pos;
+  }
+  if (pos == text.size()) {
+    return std::nullopt;
+  }
+
+  std::wstring result;
+  result.reserve(text.size());
+  for (size_t i = 0; i < pos; ++i) {
+    result.push_back(static_cast<unsigned char>(text[i]));
+  }
+
+  while (pos < text.size()) {
+    auto decoded = decode_utf8_character(text.substr(pos));
+    if (!decoded) {
+      return std::nullopt;
+    }
+    auto [codepoint, length] = *decoded;
+    if (codepoint <= 0xffff) {
+      result.push_back(static_cast<wchar_t>(codepoint));
+    } else {
+      codepoint -= 0x10000;
+      result.push_back(static_cast<wchar_t>(0xd800 + (codepoint >> 10)));
+      result.push_back(static_cast<wchar_t>(0xdc00 + (codepoint & 0x3ff)));
+    }
+    pos += length;
+  }
+  return result;
+}
 #endif
 
 // Search for the first match of the following regular expression:
@@ -213,6 +295,26 @@ find_first_ansi_csi_seq(std::string_view string)
 void
 write_console_data(int fd, std::string_view data)
 {
+  HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+  DWORD mode;
+  if (GetConsoleMode(handle, &mode)) {
+    if (auto utf16 = utf8_to_utf16(data)) {
+      size_t pos = 0;
+      while (pos < utf16->size()) {
+        DWORD count = static_cast<DWORD>(std::min<size_t>(
+          utf16->size() - pos, std::numeric_limits<DWORD>::max()));
+        DWORD written;
+        if (!WriteConsoleW(
+              handle, utf16->data() + pos, count, &written, nullptr)
+            || written == 0) {
+          throw core::Error("Failed to write Unicode text to console");
+        }
+        pos += written;
+      }
+      return;
+    }
+  }
+
   util::throw_on_error<core::Error>(
     util::write_fd(fd, data.data(), data.length()),
     FMT("Failed to write to fd {}: ", fd));
@@ -447,9 +549,13 @@ send_to_console(const Context& ctx, std::string_view text, int fd)
   }
 #endif
 
+#ifdef _WIN32
+  write_console_data(fd, text_to_send);
+#else
   util::throw_on_error<core::Error>(
     util::write_fd(fd, text_to_send.data(), text_to_send.length()),
     FMT("Failed to write to fd {}: ", fd));
+#endif
 }
 
 std::string
