@@ -73,6 +73,10 @@ public:
   // Have we tried and failed to get colored diagnostics?
   bool diagnostics_color_failed = false;
 
+  // Did ccache force diagnostic URLs, and did the compiler reject the option?
+  bool diagnostics_urls_forced = false;
+  bool diagnostics_urls_failed = false;
+
   // The preprocessor's stderr output.
   util::Bytes cpp_stderr_data;
 

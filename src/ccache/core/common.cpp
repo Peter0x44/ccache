@@ -66,6 +66,46 @@ find_first_ansi_csi_seq(std::string_view string)
   }
 }
 
+std::string_view
+find_first_ansi_osc8_seq(std::string_view string)
+{
+  for (size_t start = 0; start + 3 < string.size(); ++start) {
+    if (string[start] != 0x1b || string[start + 1] != ']'
+        || string[start + 2] != '8' || string[start + 3] != ';') {
+      continue;
+    }
+
+    for (size_t pos = start + 4; pos < string.size(); ++pos) {
+      if (string[pos] == 0x07) {
+        return string.substr(start, pos + 1 - start);
+      }
+      if (string[pos] == 0x1b && pos + 1 < string.size()
+          && string[pos + 1] == '\\') {
+        return string.substr(start, pos + 2 - start);
+      }
+    }
+  }
+  return {};
+}
+
+std::string
+strip_ansi_osc8_seqs(std::string_view string)
+{
+  std::string result;
+  size_t pos = 0;
+  while (pos < string.length()) {
+    auto seq_span = find_first_ansi_osc8_seq(string.substr(pos));
+    if (seq_span.empty()) {
+      result.append(string.data() + pos, string.length() - pos);
+      break;
+    }
+    size_t seq_pos = seq_span.data() - string.data();
+    result.append(string.data() + pos, seq_pos - pos);
+    pos = seq_pos + seq_span.length();
+  }
+  return result;
+}
+
 } // namespace
 
 namespace core {
@@ -198,6 +238,11 @@ send_to_console(const Context& ctx, std::string_view text, int fd)
 
   if (ctx.args_info.strip_diagnostics_colors) {
     modified_text = strip_ansi_csi_seqs(text);
+    text_to_send = modified_text;
+  }
+
+  if (ctx.args_info.strip_diagnostics_urls) {
+    modified_text = strip_ansi_osc8_seqs(text_to_send);
     text_to_send = modified_text;
   }
 

@@ -57,6 +57,7 @@ using util::DirEntry;
 namespace {
 
 enum class ColorDiagnostics : int8_t { never, automatic, always };
+enum class DiagnosticUrls : int8_t { never, automatic, always };
 
 // The dependency target in the dependency file is taken from the highest
 // priority source.
@@ -84,6 +85,7 @@ public:
   bool found_valid_Fp = false;
   bool found_syntax_only = false;
   ColorDiagnostics color_diagnostics = ColorDiagnostics::automatic;
+  DiagnosticUrls diagnostic_urls = DiagnosticUrls::automatic;
   std::unordered_map<std::string, std::vector<std::string>> xarch_args;
   bool found_mf_opt = false;
   bool found_wp_md_or_mmd_opt = false;
@@ -181,6 +183,54 @@ color_output_possible()
   const char* term_env = getenv("TERM");
   return isatty(STDERR_FILENO) && term_env
          && util::to_lowercase(term_env) != "dumb";
+}
+
+bool
+diagnostic_urls_possible()
+{
+#ifdef _WIN32
+  DWORD mode;
+  HANDLE stderr_handle =
+    reinterpret_cast<HANDLE>(_get_osfhandle(STDERR_FILENO));
+  if (!GetConsoleMode(stderr_handle, &mode)) {
+    return false;
+  }
+
+#  ifdef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+  if (!(mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+    mode |= ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    if (!SetConsoleMode(stderr_handle, mode)) {
+      return false;
+    }
+  }
+#  else
+  return false;
+#  endif
+#else
+  if (!color_output_possible()) {
+    return false;
+  }
+#endif
+
+  const char* color_term = getenv("COLORTERM");
+  if (color_term
+      && (std::string_view(color_term) == "xfce4-terminal"
+          || std::string_view(color_term) == "gnome-terminal")) {
+    return false;
+  }
+
+  if (getenv("GCC_URLS") || getenv("TERM_URLS")) {
+    return true;
+  }
+
+  const char* term = getenv("TERM");
+  if (!color_term && term
+      && (std::string_view(term) == "xterm"
+          || std::string_view(term) == "linux")) {
+    return false;
+  }
+
+  return true;
 }
 
 bool
@@ -1245,6 +1295,18 @@ process_option_arg(const Context& ctx,
       state.color_diagnostics = ColorDiagnostics::automatic;
       state.add_compiler_only_arg_no_hash(args[i]);
       return Statistic::none;
+    } else if (arg == "-fdiagnostics-urls=always") {
+      state.diagnostic_urls = DiagnosticUrls::always;
+      state.add_compiler_only_arg_no_hash(args[i]);
+      return Statistic::none;
+    } else if (arg == "-fdiagnostics-urls=never") {
+      state.diagnostic_urls = DiagnosticUrls::never;
+      state.add_compiler_only_arg_no_hash(args[i]);
+      return Statistic::none;
+    } else if (arg == "-fdiagnostics-urls=auto") {
+      state.diagnostic_urls = DiagnosticUrls::automatic;
+      state.add_compiler_only_arg_no_hash(args[i]);
+      return Statistic::none;
     }
   } else if (config.is_compiler_group_clang()) {
     // In the "-Xclang -fcolor-diagnostics" form, -Xclang is skipped and the
@@ -1856,6 +1918,15 @@ process_args(Context& ctx)
     args_info.strip_diagnostics_colors = false;
   }
 
+  const bool force_diagnostic_urls = config.is_compiler_group_gcc();
+  if (force_diagnostic_urls) {
+    const bool diagnostic_urls_enabled =
+      state.diagnostic_urls != DiagnosticUrls::automatic
+        ? state.diagnostic_urls == DiagnosticUrls::always
+        : diagnostic_urls_possible();
+    args_info.strip_diagnostics_urls = !diagnostic_urls_enabled;
+  }
+
   if (args_info.generating_dependencies) {
     if (state.output_dep_origin == OutputDepOrigin::none) {
       args_info.output_dep = util::with_extension(args_info.output_obj, ".d");
@@ -1951,6 +2022,10 @@ process_args(Context& ctx)
 
   if (diagnostics_color_arg) {
     state.add_compiler_only_arg_no_hash(*diagnostics_color_arg);
+  }
+  if (force_diagnostic_urls) {
+    state.add_compiler_only_arg_no_hash("-fdiagnostics-urls=always");
+    ctx.diagnostics_urls_forced = true;
   }
 
   if (ctx.config.depend_mode() && !args_info.generating_includes) {

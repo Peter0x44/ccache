@@ -118,6 +118,9 @@ struct ArgsInfo
   // Whether to strip color codes from diagnostic messages on output.
   bool strip_diagnostics_colors = false;
 
+  // Whether to strip URL escape sequences from diagnostic messages on output.
+  bool strip_diagnostics_urls = false;
+
   // Have we seen --?
   bool seen_double_dash = false;
 
